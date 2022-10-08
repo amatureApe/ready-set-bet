@@ -12,6 +12,7 @@ contract OO_BetHandler {
     uint256 requestTime = 0; // Store the request time so we can re-use it later.
     bytes32 identifier = bytes32("YES_OR_NO_QUERY"); // Use the yes no idetifier to ask arbitary questions, such as the weather on a particular day.
     address constant ZERO_ADDRESS = address(0);
+    // 0x0000000000000000000000000000000000000000
 
     struct Bet {
         bytes question;
@@ -19,6 +20,7 @@ contract OO_BetHandler {
         uint256 reward;
         uint256 liveness;
         address creator; // Creator of the bet contract.
+        bool privateBet; // Is the bet meant for a specific person or open to everyone?
         address affirmation; // Address of the side of the bet that affirms the question.
         uint256 affirmationAmount; // Amount deposited into the bet by the affrimation.
         address negation; // Address of the side of the bet that negates the question.
@@ -29,13 +31,14 @@ contract OO_BetHandler {
 
     enum BetStatus {
         OPEN,
-        PENDING,
         ACTIVE,
-        SETTLED
+        SETTLING,
+        SETTLED,
+        CLAIMED
     }
 
-    mapping(address => Bet[]) public userBets; // All of the user's active bets.
-    mapping(address => uint256) public numOfBets; // Number of bets a user has active.
+    mapping(address => Bet[]) public userActiveBets; // All of the user's active bets.
+    mapping(address => Bet[]) public userSettledBets; // All of the user's settled bets.
     mapping(uint256 => Bet) public bets; // All bets mapped by their betId
     uint256 betId = 0; // latest global betId for all managed bets.
 
@@ -44,12 +47,16 @@ contract OO_BetHandler {
         address _bondCurrency,
         uint256 _reward,
         uint256 _liveness,
+        bool _privateBet,
+        // If _privateBet is false, _privateBetRecipient should be 0x0000000000000000000000000000000000000000
+        address _privateBetRecipient,
         bool _affirmation,
         uint256 _betAmount,
         uint256 _counterBetAmount
     ) public {
         bytes memory ancillaryData = createQuestion(_question); // Question to ask the UMA Oracle.
         IERC20 bondCurrency = IERC20(_bondCurrency); // Use preferred token as the bond currency.
+
         address affirmation;
         uint256 affirmationAmount;
         address negation;
@@ -65,40 +72,48 @@ contract OO_BetHandler {
             affirmationAmount = _counterBetAmount;
         }
 
+        if (_privateBet == true) {
+            affirmation == msg.sender
+                ? negation = _privateBetRecipient
+                : affirmation = _privateBetRecipient;
+        }
+
         Bet memory bet = Bet(
             ancillaryData,
             bondCurrency,
             _reward,
             _liveness,
             msg.sender,
+            _privateBet,
             affirmation,
             affirmationAmount,
             negation,
             negationAmount,
-            betId + 1,
+            betId,
             BetStatus.OPEN
         );
 
-        bondCurrency.approve(address(this), _betAmount + _reward);
-        bondCurrency.transferFrom(
-            msg.sender,
-            address(this),
-            _betAmount + _reward
-        );
-        bondCurrency.approve(address(this), 0);
+        // Make sure to approve this contract to spend your ERC20 externally first
+        bondCurrency.transferFrom(msg.sender, address(this), _betAmount);
 
-        userBets[msg.sender].push(bet);
+        userActiveBets[msg.sender].push(bet);
+        bets[betId] = bet;
         betId += 1;
     }
 
     function takeBet(uint256 _betId) public {
         Bet storage bet = bets[_betId];
-        require(
-            bet.affirmation == ZERO_ADDRESS || bet.negation == ZERO_ADDRESS
-        );
+        require(msg.sender != bet.creator, "Can't take your own bet");
+        if (bet.privateBet == false) {
+            require(
+                bet.affirmation == ZERO_ADDRESS || bet.negation == ZERO_ADDRESS,
+                "Bet already taken"
+            );
+        }
+        require(bet.betStatus == BetStatus.OPEN, "Bet not Open");
 
         if (bet.affirmation == ZERO_ADDRESS) {
-            bet.bondCurrency.approve(address(this), bet.affirmationAmount);
+            // Make sure to approve this contract to spend your ERC20 externally first
             bet.bondCurrency.transferFrom(
                 msg.sender,
                 address(this),
@@ -106,7 +121,7 @@ contract OO_BetHandler {
             );
             bet.affirmation = msg.sender;
         } else {
-            bet.bondCurrency.approve(address(this), bet.negationAmount);
+            // Make sure to approve this contract to spend your ERC20 externally first
             bet.bondCurrency.transferFrom(
                 msg.sender,
                 address(this),
@@ -114,10 +129,16 @@ contract OO_BetHandler {
             );
             bet.negation = msg.sender;
         }
+
+        bet.betStatus = BetStatus.ACTIVE;
     }
 
     function requestData(uint256 _betId) public {
         Bet storage bet = bets[_betId];
+        require(
+            bet.betStatus == BetStatus.ACTIVE,
+            "Bet not ready to be settled"
+        );
         require(bet.affirmation == msg.sender || bet.negation == msg.sender);
 
         bytes memory ancillaryData = bet.question; // Question to ask the UMA Oracle.
@@ -140,17 +161,41 @@ contract OO_BetHandler {
             reward
         );
         oo.setCustomLiveness(identifier, requestTime, ancillaryData, liveness);
+
+        bet.betStatus = BetStatus.SETTLING;
     }
 
     // Settle the request once it's gone through the liveness period of 30 seconds. This acts the finalize the voted on price.
     // In a real world use of the Optimistic Oracle this should be longer to give time to disputers to catch bat price proposals.
     function settleRequest(uint256 _betId) public {
         Bet storage bet = bets[_betId];
+        require(bet.betStatus == BetStatus.SETTLING, "Bet not settling");
         require(bet.affirmation == msg.sender || bet.negation == msg.sender);
 
         bytes memory ancillaryData = bet.question;
 
         oo.settle(address(this), identifier, requestTime, ancillaryData);
+        bet.betStatus = BetStatus.SETTLED;
+    }
+
+    function claimWinnings(uint256 _betId) public {
+        Bet storage bet = bets[_betId];
+        uint256 totalWinnings = bet.affirmationAmount + bet.negationAmount;
+        int256 settlementData = getSettledData(_betId);
+        require(bet.betStatus == BetStatus.SETTLED, "Bet not yet settled");
+        require(
+            settlementData == 1e18 || settlementData == 0,
+            "Invalid settlement"
+        );
+        if (settlementData == 1e18) {
+            require(msg.sender == bet.affirmation, "Negation did not win bet");
+            bet.bondCurrency.transfer(bet.affirmation, totalWinnings);
+        } else {
+            require(msg.sender == bet.negation, "Affirmation did not win bet");
+            bet.bondCurrency.transfer(bet.negation, totalWinnings);
+        }
+
+        bet.betStatus = BetStatus.CLAIMED;
     }
 
     //******* VIEW FUNCTIONS ***********
