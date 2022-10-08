@@ -10,7 +10,7 @@ contract OO_BetHandler {
         OptimisticOracleV2Interface(0xA5B9d8a0B0Fa04Ba71BDD68069661ED5C0848884);
 
     uint256 requestTime = 0; // Store the request time so we can re-use it later.
-    bytes32 identifier = bytes32("YES_OR_NO_QUERY"); // Use the yes no idetifier to ask arbitary questions, such as the weather on a particular day.
+    bytes32 constant IDENTIFIER = bytes32("YES_OR_NO_QUERY"); // Use the yes no idetifier to ask arbitary questions, such as the weather on a particular day.
     address constant ZERO_ADDRESS = address(0);
     // 0x0000000000000000000000000000000000000000
 
@@ -37,8 +37,13 @@ contract OO_BetHandler {
         CLAIMED
     }
 
+    mapping(address => Bet[]) public userCreatedBets; // All bets created by the user.
+    mapping(address => Bet[]) public userOpenBets; // All of the user's bets pending uptake.
     mapping(address => Bet[]) public userActiveBets; // All of the user's active bets.
     mapping(address => Bet[]) public userSettledBets; // All of the user's settled bets.
+    mapping(address => Bet[]) public userWonBets; // All bets the user has won.
+    mapping(address => Bet[]) public userLostBets; // All bets the user has lost.
+    mapping(address => Bet[]) public userAllBets; // All bets the user is and has participated in.
     mapping(uint256 => Bet) public bets; // All bets mapped by their betId
     uint256 betId = 0; // latest global betId for all managed bets.
 
@@ -96,7 +101,9 @@ contract OO_BetHandler {
         // Make sure to approve this contract to spend your ERC20 externally first
         bondCurrency.transferFrom(msg.sender, address(this), _betAmount);
 
-        userActiveBets[msg.sender].push(bet);
+        userAllBets[msg.sender].push(bet);
+        userCreatedBets[msg.sender].push(bet);
+        userOpenBets[msg.sender].push(bet);
         bets[betId] = bet;
         betId += 1;
     }
@@ -109,6 +116,11 @@ contract OO_BetHandler {
                 bet.affirmation == ZERO_ADDRESS || bet.negation == ZERO_ADDRESS,
                 "Bet already taken"
             );
+        } else {
+            require(
+                msg.sender == bet.affirmation || msg.sender == bet.negation,
+                "Not bet recipient"
+            );
         }
         require(bet.betStatus == BetStatus.OPEN, "Bet not Open");
 
@@ -120,6 +132,7 @@ contract OO_BetHandler {
                 bet.affirmationAmount
             );
             bet.affirmation = msg.sender;
+            userActiveBets[bet.affirmation].push(bet);
         } else {
             // Make sure to approve this contract to spend your ERC20 externally first
             bet.bondCurrency.transferFrom(
@@ -128,9 +141,13 @@ contract OO_BetHandler {
                 bet.negationAmount
             );
             bet.negation = msg.sender;
+            userActiveBets[bet.negation].push(bet);
         }
 
         bet.betStatus = BetStatus.ACTIVE;
+        userAllBets[msg.sender].push(bet);
+
+        delete userOpenBets[bet.creator];
     }
 
     function requestData(uint256 _betId) public {
@@ -154,13 +171,13 @@ contract OO_BetHandler {
 
         // Now, make the price request to the Optimistic oracle with preferred inputs.
         oo.requestPrice(
-            identifier,
+            IDENTIFIER,
             requestTime,
             ancillaryData,
             bondCurrency,
             reward
         );
-        oo.setCustomLiveness(identifier, requestTime, ancillaryData, liveness);
+        oo.setCustomLiveness(IDENTIFIER, requestTime, ancillaryData, liveness);
 
         bet.betStatus = BetStatus.SETTLING;
     }
@@ -174,8 +191,11 @@ contract OO_BetHandler {
 
         bytes memory ancillaryData = bet.question;
 
-        oo.settle(address(this), identifier, requestTime, ancillaryData);
+        oo.settle(address(this), IDENTIFIER, requestTime, ancillaryData);
         bet.betStatus = BetStatus.SETTLED;
+
+        userSettledBets[bet.affirmation].push(bet);
+        userSettledBets[bet.negation].push(bet);
     }
 
     function claimWinnings(uint256 _betId) public {
@@ -190,12 +210,18 @@ contract OO_BetHandler {
         if (settlementData == 1e18) {
             require(msg.sender == bet.affirmation, "Negation did not win bet");
             bet.bondCurrency.transfer(bet.affirmation, totalWinnings);
+            userWonBets[bet.affirmation].push(bet);
+            userLostBets[bet.negation].push(bet);
         } else {
             require(msg.sender == bet.negation, "Affirmation did not win bet");
             bet.bondCurrency.transfer(bet.negation, totalWinnings);
+            userWonBets[bet.negation].push(bet);
+            userLostBets[bet.affirmation].push(bet);
         }
 
         bet.betStatus = BetStatus.CLAIMED;
+        delete userActiveBets[bet.affirmation];
+        delete userActiveBets[bet.negation];
     }
 
     //******* VIEW FUNCTIONS ***********
@@ -221,7 +247,7 @@ contract OO_BetHandler {
             oo
                 .getRequest(
                     address(this),
-                    identifier,
+                    IDENTIFIER,
                     requestTime,
                     ancillaryData
                 )
