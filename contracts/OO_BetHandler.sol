@@ -34,7 +34,8 @@ contract OO_BetHandler {
         ACTIVE,
         SETTLING,
         SETTLED,
-        CLAIMED
+        CLAIMED,
+        KILLED
     }
 
     uint256 betId = 0; // latest global betId for all managed bets.
@@ -44,7 +45,7 @@ contract OO_BetHandler {
     function setBet(
         string calldata _question,
         address _bondCurrency,
-        uint256 _reward,
+        uint256 _reward, // Reward is paid to settlers on UMA. It is recommended to pay 5%-10%
         uint256 _liveness,
         bool _privateBet,
         // If _privateBet is false, _privateBetRecipient should be 0x0000000000000000000000000000000000000000
@@ -207,6 +208,21 @@ contract OO_BetHandler {
         bet.betStatus = BetStatus.CLAIMED;
     }
 
+    function killBet(uint256 _betId) public {
+        Bet storage bet = bets[_betId];
+        int256 settlementData = getSettledData(_betId);
+        require(bet.betStatus == BetStatus.SETTLED, "Bet not yet settled");
+        require(
+            msg.sender == bet.affirmation || msg.sender == bet.negation,
+            "This is not your bet"
+        );
+        require(settlementData == 2 * 1e18, "Bet is settleable");
+        bet.bondCurrency.transfer(bet.affirmation, bet.affirmationAmount);
+        bet.bondCurrency.transfer(bet.negation, bet.negationAmount);
+
+        bet.betStatus = BetStatus.KILLED;
+    }
+
     //******* VIEW FUNCTIONS ***********
     function createQuestion(string memory _question)
         public
@@ -214,7 +230,11 @@ contract OO_BetHandler {
         returns (bytes memory)
     {
         bytes memory question = bytes(
-            string.concat("Q: ", _question, "? A:1 for yes. 0 for no.")
+            string.concat(
+                "Q: ",
+                _question,
+                "? --- A:1 for yes. 0 for no. 2 for ambiguous/unknowable"
+            )
         );
         return question;
     }
