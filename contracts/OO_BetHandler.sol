@@ -37,15 +37,9 @@ contract OO_BetHandler {
         CLAIMED
     }
 
-    mapping(address => Bet[]) public userCreatedBets; // All bets created by the user.
-    mapping(address => Bet[]) public userOpenBets; // All of the user's bets pending uptake.
-    mapping(address => Bet[]) public userActiveBets; // All of the user's active bets.
-    mapping(address => Bet[]) public userSettledBets; // All of the user's settled bets.
-    mapping(address => Bet[]) public userWonBets; // All bets the user has won.
-    mapping(address => Bet[]) public userLostBets; // All bets the user has lost.
-    mapping(address => Bet[]) public userAllBets; // All bets the user is and has participated in.
-    mapping(uint256 => Bet) public bets; // All bets mapped by their betId
     uint256 betId = 0; // latest global betId for all managed bets.
+    mapping(uint256 => Bet) public bets; // All bets mapped by their betId
+    mapping(address => uint256[]) public userBets; // All bets the user is and has participated in.
 
     function setBet(
         string calldata _question,
@@ -101,10 +95,8 @@ contract OO_BetHandler {
         // Make sure to approve this contract to spend your ERC20 externally first
         bondCurrency.transferFrom(msg.sender, address(this), _betAmount);
 
-        userAllBets[msg.sender].push(bet);
-        userCreatedBets[msg.sender].push(bet);
-        userOpenBets[msg.sender].push(bet);
         bets[betId] = bet;
+        userBets[msg.sender].push(betId);
         betId += 1;
     }
 
@@ -132,7 +124,6 @@ contract OO_BetHandler {
                 bet.affirmationAmount
             );
             bet.affirmation = msg.sender;
-            userActiveBets[bet.affirmation].push(bet);
         } else {
             // Make sure to approve this contract to spend your ERC20 externally first
             bet.bondCurrency.transferFrom(
@@ -141,13 +132,10 @@ contract OO_BetHandler {
                 bet.negationAmount
             );
             bet.negation = msg.sender;
-            userActiveBets[bet.negation].push(bet);
         }
 
+        userBets[msg.sender].push(_betId);
         bet.betStatus = BetStatus.ACTIVE;
-        userAllBets[msg.sender].push(bet);
-
-        delete userOpenBets[bet.creator];
     }
 
     function requestData(uint256 _betId) public {
@@ -193,9 +181,6 @@ contract OO_BetHandler {
 
         oo.settle(address(this), IDENTIFIER, requestTime, ancillaryData);
         bet.betStatus = BetStatus.SETTLED;
-
-        userSettledBets[bet.affirmation].push(bet);
-        userSettledBets[bet.negation].push(bet);
     }
 
     function claimWinnings(uint256 _betId) public {
@@ -204,24 +189,22 @@ contract OO_BetHandler {
         int256 settlementData = getSettledData(_betId);
         require(bet.betStatus == BetStatus.SETTLED, "Bet not yet settled");
         require(
+            msg.sender == bet.affirmation || msg.sender == bet.negation,
+            "This is not your bet"
+        );
+        require(
             settlementData == 1e18 || settlementData == 0,
             "Invalid settlement"
         );
         if (settlementData == 1e18) {
             require(msg.sender == bet.affirmation, "Negation did not win bet");
             bet.bondCurrency.transfer(bet.affirmation, totalWinnings);
-            userWonBets[bet.affirmation].push(bet);
-            userLostBets[bet.negation].push(bet);
         } else {
             require(msg.sender == bet.negation, "Affirmation did not win bet");
             bet.bondCurrency.transfer(bet.negation, totalWinnings);
-            userWonBets[bet.negation].push(bet);
-            userLostBets[bet.affirmation].push(bet);
         }
 
         bet.betStatus = BetStatus.CLAIMED;
-        delete userActiveBets[bet.affirmation];
-        delete userActiveBets[bet.negation];
     }
 
     //******* VIEW FUNCTIONS ***********
